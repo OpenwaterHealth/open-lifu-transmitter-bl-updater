@@ -1,0 +1,6 @@
+build/
+*.bin
+*.hex
+*.elf
+*.map
+blimg/

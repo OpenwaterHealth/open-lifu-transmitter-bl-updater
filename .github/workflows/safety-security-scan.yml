@@ -1,0 +1,60 @@
+name: "Medical Firmware Safety & Security Scan"
+
+on:
+  push:
+    branches: [ main, next ]
+  pull_request:
+    branches: [ main, next ]
+  # New CVEs are published against unchanged code: rescan the SBOM weekly.
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  static-analysis:
+    # Pinned: the apt cppcheck of ubuntu-24.04 (2.13) is the version the other
+    # Open-LIFU firmware scans are validated with.
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Analysis Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+          pip3 install lizard
+
+      # Our sources only: the vendored CMSIS headers are included, not analysed.
+      # The UPDATER_* strings come from a header CMake generates at build time.
+      - name: Run Cppcheck (Safety & Standards)
+        run: |
+          cppcheck --enable=warning,style,performance,portability \
+                   --std=c11 \
+                   -DUPDATER_PRODUCT_STR='"product"' \
+                   -DUPDATER_VERSION_STR='"version"' \
+                   -DUPDATER_BL_TAG_STR='"tag"' \
+                   --error-exitcode=1 \
+                   --force \
+                   --inline-suppr \
+                   --template="[{severity}] {file}:{line} {id} - {message}" \
+                   --suppress=missingIncludeSystem \
+                   --suppress=missingInclude \
+                   ./src
+
+      - name: Check Code Complexity (IEC 62304 Requirement)
+        run: lizard ./src -C 15 -L 100 -w
+
+      # The SBOM of the source tree (no embedded bootloader or toolchain: those are
+      # recorded by the build workflow's SBOM of the signed image).
+      - name: Generate SBOM
+        run: |
+          python3 scripts/gen_sbom.py --root . --manifest scripts/sbom-manifest.json \
+            --name "${GITHUB_REPOSITORY#*/}" -o sbom.cdx.json
+
+      - name: Scan SBOM for Vulnerabilities (grype)
+        uses: anchore/scan-action@v6
+        with:
+          sbom: "sbom.cdx.json"
+          fail-build: true
+          severity-cutoff: high

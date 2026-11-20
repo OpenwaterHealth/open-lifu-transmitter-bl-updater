@@ -1,0 +1,203 @@
+name: Build and sign updater
+
+# ---------------------------------------------------------------------------
+# Builds the bootloader updater around a released research bootloader, signs it
+# with the research key (repository secret FW_SIGNING_KEY), checks the keys, generates
+# the SBOM and, on a tag, publishes a GitHub release. The same workflow is kept in
+# open-lifu-console-bl-updater and open-lifu-transmitter-bl-updater; only env: differs.
+#
+# Keys. The fielded bootloader (FIELDED_BL) trusts one key, committed in its tag as
+# py-tools/keys/ecdsa_public.pem. The embedded bootloader (BL_RELEASE) is the research
+# build and trusts py-tools/keys/research/ecdsa_public.pem. The run fails unless the
+# signing key is both of those (the same research key) and is not the clinical key.
+#
+# Versions. The release tag (e.g. 1.0.0) versions this repository. The image is signed
+# with FW_VERSION, a different number: the fielded bootloader refuses an image below
+# the installed application or its anti-rollback floor, so it must be above every
+# fielded application (transmitter 2.0.x) and below the first application for the new
+# bootloader (2.1.0), which then installs without a downgrade.
+#
+# Required secret: FW_SIGNING_KEY  ECDSA P-256 private key (PEM), the research key.
+# ---------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [ "main", "next" ]
+    tags: [ "*.*.*", "*.*.*-rc.*" ]
+  pull_request:
+    branches: [ "main", "next" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PRODUCT: transmitter
+  BL_REPO: open-lifu-transmitter-bl
+  BL_RELEASE: "1.1.0-rc.1"          # research bootloader embedded (GitHub release)
+  BL_ASSET: open-lifu-transmitter-bl.bin
+  FIELDED_BL: "1.0.1"               # the bootloader this updater replaces
+  FW_VERSION: "2.0.31"              # signed image version (see above)
+  SDK_RELEASE: "2.1.0-rc.7"         # openlifu-sdk signer
+  BUILD_IMAGE: ghcr.io/openwaterhealth/stm32-build-env:latest
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check signing secret
+        env:
+          FW_SIGNING_KEY: ${{ secrets.FW_SIGNING_KEY }}
+        run: |
+          [ -n "$FW_SIGNING_KEY" ] || { echo "::error::FW_SIGNING_KEY (research ECDSA key, PEM) is not set." >&2; exit 1; }
+
+      - name: Checkout the embedded bootloader's keys
+        uses: actions/checkout@v4
+        with:
+          repository: OpenwaterHealth/${{ env.BL_REPO }}
+          ref: ${{ env.BL_RELEASE }}
+          path: _bl
+          sparse-checkout: py-tools/keys
+      - name: Checkout the fielded bootloader's key
+        uses: actions/checkout@v4
+        with:
+          repository: OpenwaterHealth/${{ env.BL_REPO }}
+          ref: ${{ env.FIELDED_BL }}
+          path: _bl_fielded
+          sparse-checkout: py-tools/keys
+
+      - name: Key check
+        id: keys
+        env:
+          FW_SIGNING_KEY: ${{ secrets.FW_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          KD="$(mktemp -d)"; trap 'rm -rf "$KD"' EXIT
+          printf '%s\n' "$FW_SIGNING_KEY" > "$KD/k.pem"
+          openssl pkey -in "$KD/k.pem" -pubout -out "$KD/k.pub.pem"
+          fp() { openssl pkey -pubin -in "$1" -outform DER | sha256sum | cut -d' ' -f1; }
+          SIGN=$(fp "$KD/k.pub.pem")
+          FIELDED=$(fp _bl_fielded/py-tools/keys/ecdsa_public.pem)
+          RESEARCH=$(fp _bl/py-tools/keys/research/ecdsa_public.pem)
+          CLINICAL=$(fp _bl/py-tools/keys/clinical/ecdsa_public.pem)
+          echo "signing key            : sha256:$SIGN"
+          echo "${BL_REPO} ${FIELDED_BL} trusts : sha256:$FIELDED"
+          echo "${BL_REPO} ${BL_RELEASE} research: sha256:$RESEARCH"
+          echo "${BL_REPO} ${BL_RELEASE} clinical: sha256:$CLINICAL"
+          [ "$SIGN" = "$FIELDED" ]  || { echo "::error::FW_SIGNING_KEY is not the key ${BL_REPO} ${FIELDED_BL} trusts" >&2; exit 1; }
+          [ "$SIGN" = "$RESEARCH" ] || { echo "::error::FW_SIGNING_KEY is not ${BL_REPO} ${BL_RELEASE}'s research key" >&2; exit 1; }
+          [ "$SIGN" != "$CLINICAL" ] || { echo "::error::FW_SIGNING_KEY is the clinical key" >&2; exit 1; }
+          echo "fp=$SIGN" >> "$GITHUB_OUTPUT"
+
+      - name: Download the embedded bootloader
+        id: bl
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p _bl_bin
+          gh release download "$BL_RELEASE" --repo "OpenwaterHealth/$BL_REPO" \
+            --pattern "$BL_ASSET" --dir _bl_bin --clobber
+          test -s "_bl_bin/$BL_ASSET"
+          echo "sha256=$(sha256sum "_bl_bin/$BL_ASSET" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Pull build image
+        run: docker pull "$BUILD_IMAGE"
+
+      - name: Build (Release)
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          docker run --rm -v "$GITHUB_WORKSPACE":/workspace -w /workspace "$BUILD_IMAGE" \
+            bash -lc "git config --global --add safe.directory /workspace && \
+                      cmake --preset Release -DBL_IMAGE=/workspace/_bl_bin/$BL_ASSET -DBL_TAG=$BL_RELEASE && \
+                      cmake --build build/Release -j 10 && \
+                      bash scripts/check_ramfunc.sh build/Release/$REPO.elf"
+          python3 - "build/Release/$REPO.bin" "_bl_bin/$BL_ASSET" <<'PY'
+          import sys
+          img, bl = (open(p, "rb").read() for p in sys.argv[1:3])
+          sys.exit(0 if bl in img else "the embedded bootloader is not in the image")
+          PY
+
+      - name: Install openlifu-sdk (signer)
+        run: |
+          python3 -m pip install --quiet "openlifu-sdk[crypto] @ git+https://github.com/OpenwaterHealth/openlifu-sdk@${SDK_RELEASE}"
+
+      - name: Sign and verify
+        id: sign
+        env:
+          FW_SIGNING_KEY: ${{ secrets.FW_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          KD="$(mktemp -d)"; trap 'rm -rf "$KD"' EXIT
+          printf '%s\n' "$FW_SIGNING_KEY" > "$KD/ecdsa_private.pem"
+          mkdir -p _artifacts
+          OUT="_artifacts/${REPO}-signed.bin"
+          python3 -m openlifu_sdk.io.LIFUCrypto sign --keys "$KD" \
+            --firmware "build/Release/$REPO.bin" --version "$FW_VERSION" --output "$OUT" | tee _sign.out
+          python3 -m openlifu_sdk.io.LIFUCrypto verify --public-key _bl/py-tools/keys/research/ecdsa_public.pem "$OUT" | tee _verify.out
+          grep -q 'Overall *: VALID' _verify.out
+          if python3 -m openlifu_sdk.io.LIFUCrypto verify --public-key _bl/py-tools/keys/clinical/ecdsa_public.pem "$OUT" | grep -q 'Overall *: VALID'; then
+            echo "::error::the image verifies with the clinical key" >&2; exit 1
+          fi
+          echo "fwversion=$(sed -n 's/.*FW version *: *\([0-9]\+\).*/\1/p' _sign.out | head -n1)" >> "$GITHUB_OUTPUT"
+
+      - name: SBOM and checksums
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          VER="$(git describe --tags --always --dirty)"
+          TOOLCHAIN="$(docker run --rm "$BUILD_IMAGE" arm-none-eabi-gcc --version | head -1)"
+          IMG_REF="$(docker inspect --format '{{index .RepoDigests 0}}' "$BUILD_IMAGE")"
+          python3 scripts/gen_sbom.py --root . --manifest scripts/sbom-manifest.json \
+            --name "$REPO" --version "$VER" --toolchain "$TOOLCHAIN" --build-image "$IMG_REF" \
+            --embedded-bootloader "$BL_REPO" "$BL_RELEASE" "${{ steps.bl.outputs.sha256 }}" \
+            --signing-domain research --signing-key-fingerprint "${{ steps.keys.outputs.fp }}" \
+            --property "openwater:signed-version=$FW_VERSION" \
+            --property "openwater:replaces-bootloader=$BL_REPO $FIELDED_BL" \
+            -o "_artifacts/${REPO}.cdx.json"
+          ( cd _artifacts && sha256sum -- * > SHA256SUMS && cat SHA256SUMS )
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event.repository.name }}
+          path: _artifacts/
+          if-no-files-found: error
+
+      - name: Release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          {
+            if [[ "$GITHUB_REF_NAME" == *-rc.* ]]; then echo "⚠️ **PRE-RELEASE – NOT FOR PRODUCTION**"; echo; fi
+            echo "One-shot updater for research ${PRODUCT} units on \`${BL_REPO} ${FIELDED_BL}\`."
+            echo "It replaces that bootloader with \`${BL_REPO} ${BL_RELEASE}\` (research build) and resets into its DFU;"
+            echo "openlifu-sdk then installs the application (see README)."
+            echo
+            echo "- **Embedded bootloader:** \`${BL_REPO} ${BL_RELEASE}\`, SHA-256 \`${{ steps.bl.outputs.sha256 }}\`"
+            echo "- **Signed version:** \`${FW_VERSION}\` (FwVersion \`${{ steps.sign.outputs.fwversion }}\`), research key \`sha256:${{ steps.keys.outputs.fp }}\`"
+            echo "- **Signer:** openlifu-sdk \`${SDK_RELEASE}\`"
+            echo "- **Build SHA:** \`$(git rev-parse --short HEAD)\`"
+            echo
+            echo '```'
+            cat _artifacts/SHA256SUMS
+            echo '```'
+          } > notes.md
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PRE=""
+          [[ "$GITHUB_REF_NAME" == *-rc.* ]] && PRE="--prerelease"
+          gh release create "$GITHUB_REF_NAME" _artifacts/* --title "$GITHUB_REF_NAME" --notes-file notes.md $PRE

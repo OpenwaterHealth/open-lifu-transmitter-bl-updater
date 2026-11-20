@@ -1,0 +1,16 @@
+{
+  "description": "Open-LIFU bootloader updater: one-shot application-slot image, signed with the research key the fielded 1.0.x bootloader trusts, that rewrites the bootloader with the 1.1.x research bootloader it carries, erases the old slot, the preset area and the anti-rollback floor, and resets into the new bootloader's DFU. Register-level code on CMSIS only (no HAL, no C library).",
+  "_note": "Reviewed static components. CMSIS versions, the embedded bootloader, toolchain, build image and signing key are added by scripts/gen_sbom.py at build time.",
+  "components": [
+    {
+      "type": "library",
+      "name": "libgcc",
+      "supplier": { "name": "Arm Limited (Arm GNU Toolchain)" },
+      "licenses": [ { "expression": "GPL-3.0-or-later WITH GCC-exception-3.1" } ],
+      "scope": "required",
+      "properties": [
+        { "name": "openwater:evidence", "value": "-nostartfiles -nostdlib, linked with -lgcc for compiler helper routines only; no newlib, no printf/malloc. Version: the toolchain component." }
+      ]
+    }
+  ]
+}
