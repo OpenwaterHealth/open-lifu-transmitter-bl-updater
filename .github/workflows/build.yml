@@ -34,7 +34,7 @@ permissions:
 env:
   PRODUCT: transmitter
   BL_REPO: open-lifu-transmitter-bl
-  BL_RELEASE: "1.1.0-rc.1"          # research bootloader embedded (GitHub release)
+  BL_RELEASE: "1.1.0-rc.2"          # research bootloader embedded (GitHub release)
   BL_ASSET: open-lifu-transmitter-bl.bin
   FIELDED_BL: "1.0.1"               # the bootloader this updater replaces
   FW_VERSION: "2.0.31"              # signed image version (see above)

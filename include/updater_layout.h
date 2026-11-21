@@ -3,13 +3,13 @@
  * (256 KB flash, 128 pages of 2 KB, double-word programming).
  *
  *   page   0-31   0x08000000   64K  secure bootloader (rewritten by this updater)
- *   page  32-105  0x08010000  148K  application slot (this updater runs here, at +0x400)
- *   page 106-125  0x08035000   40K  presets, 10 x 4 KB (bootloader >= 1.1.0); slot before
+ *   page  32-95   0x08010000  128K  application slot (this updater runs here, at +0x400)
+ *   page  96-125  0x08030000   60K  presets, 15 x 4 KB (bootloader >= 1.1.0-rc.2); slot before
  *   page 126      0x0803F000    2K  anti-rollback floor (both bootloaders, same format)
  *   page 127      0x0803F800    2K  LIFU runtime config: KEPT (outside the cleaned range)
  *
- * Bootloader 1.0.1 (fielded with app 2.0.8) has a 188K slot, pages 32-125; 1.1.0 moves
- * pages 106-125 to the presets. The updater erases pages 32-126 before it resets, so
+ * Bootloader 1.0.1 (fielded with app 2.0.8) has a 188K slot, pages 32-125; 1.1.0-rc.2 moves
+ * pages 96-125 to the presets. The updater erases pages 32-126 before it resets, so
  * the new bootloader starts with an empty slot, blank preset slots and no floor.
  */
 #ifndef UPDATER_LAYOUT_H

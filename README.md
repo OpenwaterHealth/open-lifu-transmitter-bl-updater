@@ -63,12 +63,12 @@ re-enumeration gives it its chain address, and the SDK does that re-enumeration.
 | Pages | Address | Bootloader 1.0.x | Bootloader 1.1.x | Updater |
 |---|---|---|---|---|
 | 0-31 | `0x08000000` | bootloader | bootloader | rewritten |
-| 32-105 | `0x08010000` | slot | slot | erased (runs here) |
-| 106-125 | `0x08035000` | slot | presets, 10 × 4 KB | erased |
+| 32-95 | `0x08010000` | slot | slot | erased (runs here) |
+| 96-125 | `0x08030000` | slot | presets, 15 × 4 KB | erased |
 | 126 | `0x0803F000` | anti-rollback floor | anti-rollback floor | erased |
 | 127 | `0x0803F800` | runtime config | runtime config | **kept** |
 
-The image (about 63 KB) stays well below page 106, so it fits both slots.
+The image (about 63 KB) stays well below page 96, so it fits both slots.
 
 ## Versions
 
@@ -86,8 +86,8 @@ The build needs the Arm GNU Toolchain, CMake and Ninja (the `stm32-build-env` im
 plus the research bootloader binary from its GitHub release:
 
 ```sh
-gh release download 1.1.0-rc.1 -R OpenwaterHealth/open-lifu-transmitter-bl -p open-lifu-transmitter-bl.bin -D blimg
-cmake --preset Release -DBL_IMAGE=$PWD/blimg/open-lifu-transmitter-bl.bin -DBL_TAG=1.1.0-rc.1
+gh release download 1.1.0-rc.2 -R OpenwaterHealth/open-lifu-transmitter-bl -p open-lifu-transmitter-bl.bin -D blimg
+cmake --preset Release -DBL_IMAGE=$PWD/blimg/open-lifu-transmitter-bl.bin -DBL_TAG=1.1.0-rc.2
 cmake --build build/Release
 bash scripts/check_ramfunc.sh build/Release/open-lifu-transmitter-bl-updater.elf
 ```
