@@ -116,6 +116,31 @@ python -m openlifu_sdk.io.LIFUCrypto sign --keys <research keys dir> \
 
 `safety-security-scan.yml` runs cppcheck, lizard and a grype scan of the SBOM.
 
+## Clinical variant (research unit to clinical)
+
+`clinical-build.yml` builds the same code around the **clinical** bootloader: the clinical
+build of `open-lifu-transmitter-bl` from the private artifact bucket, which trusts the Cloud KMS key and locks
+the unit down (RDP level 1, write protection) on its first boot. It is still signed with the
+**research** key, so a research unit's bootloader (1.0.x or 1.1.x research) launches it.
+openlifu-fw-updater runs it to convert a calibrated research unit to clinical: the updater, then
+the clinical application, then the clinical presets. With openlifu-sdk that is
+`update(signed_app=<clinical app>, bl_updater=<this image>, replace_bootloader=True)`.
+
+- **Version**: signed as **31.63.30** (FwVersion 65534), the top of the range, so the research
+  bootloader takes it whatever research application or floor the unit has. Not 31.63.31: that is
+  0xFFFF, what erased flash reads as. The updater erases the slot and the floor; the clinical
+  application (2.1.0.x, Cloud KMS signed) installs next.
+- **Approval and storage**: run by hand on a release tag in the `clinical` environment
+  (`gh workflow run clinical-build.yml --ref <tag>`). The outputs (`<repo>-<tag>-clinical-signed.bin`,
+  SBOM, `SHA256SUMS`, `clinical-build-manifest.json`) go to
+  `gs://openwater-firmware-artifacts/<repo>/<tag>/` only (write-once), never to the GitHub release.
+- **Keys**: the run fails unless `FW_SIGNING_KEY` is the research key the fielded and the current
+  research bootloaders trust, and not the clinical key the embedded bootloader trusts. The
+  manifest records both fingerprints.
+- **One way**: once the clinical bootloader has locked the unit, its bootloader pages are write
+  protected and this updater cannot run on it again; it refuses on a unit whose option bytes are
+  not open in any case.
+
 ## LED
 
 | State | LD_HB (PC12) |

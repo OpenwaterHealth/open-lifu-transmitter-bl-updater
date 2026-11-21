@@ -1,0 +1,252 @@
+name: Clinical updater build (bucket)
+
+# ---------------------------------------------------------------------------
+# The clinical variant of the bootloader updater: the same code, carrying the CLINICAL
+# bootloader (from the private artifact bucket) instead of the research one. openlifu-fw-updater
+# runs it on a research unit to convert it to clinical: the unit's research bootloader verifies
+# and launches it (it is signed with the research key, FW_SIGNING_KEY), it writes the clinical
+# bootloader, which locks the unit down (RDP level 1, write protection) on its first boot, and
+# the clinical (Cloud KMS signed) application is installed after it.
+#
+# Run it by hand on a release tag, in the `clinical` environment (required reviewer):
+#   gh workflow run clinical-build.yml --ref <tag>
+# Outputs go to the private bucket only, gs://openwater-firmware-artifacts/<repo>/<tag>/
+# (write-once: a second run on the same tag fails at upload). Nothing goes to the GitHub release.
+#
+# Versions. The image is signed with FW_VERSION = 31.63.30 (FwVersion 65534): a research unit's
+# bootloader refuses an image below its installed application or its anti-rollback floor, and
+# research applications keep moving up, so it sits at the top of the range. Not 31.63.31: that
+# is 0xFFFF, what erased flash reads as. The updater erases the slot and the floor, so the
+# clinical application installed next starts from an empty floor.
+#
+# Identities (Workload Identity Federation): sa-fw-artifact-reader (any ref of this repository)
+# downloads the clinical bootloader; sa-bl-artifact-uploader (tags of this repository) uploads.
+# ---------------------------------------------------------------------------
+
+on:
+  workflow_dispatch:
+    inputs:
+      bl_release:
+        description: "open-lifu-transmitter-bl release whose clinical build to embed (default: BL_RELEASE)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  PRODUCT: transmitter
+  BL_REPO: open-lifu-transmitter-bl
+  BL_RELEASE: "1.1.0-rc.1"          # clinical bootloader embedded (bucket)
+  FIELDED_BL: "1.0.1"               # oldest research bootloader this runs on (trusts the research key)
+  FW_VERSION: "31.63.30"            # signed image version (see above)
+  SDK_RELEASE: "2.1.0-rc.9"         # openlifu-sdk signer
+  BUILD_IMAGE: ghcr.io/openwaterhealth/stm32-build-env:latest
+  GCS_BUCKET: openwater-firmware-artifacts
+  WIF_PROVIDER: projects/341318872140/locations/global/workloadIdentityPools/github/providers/github-oidc
+  READER_SA: sa-fw-artifact-reader@openwater-cloud.iam.gserviceaccount.com
+  UPLOADER_SA: sa-bl-artifact-uploader@openwater-cloud.iam.gserviceaccount.com
+
+jobs:
+  clinical:
+    runs-on: ubuntu-24.04
+    environment: clinical
+    steps:
+      - name: Require a release tag
+        run: |
+          if [[ "$GITHUB_REF" != refs/tags/* ]]; then
+            echo "::error::Run this workflow on a release tag (gh workflow run clinical-build.yml --ref <tag>), not on '$GITHUB_REF_NAME'." >&2
+            exit 1
+          fi
+          if ! [[ "$GITHUB_REF_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]]; then
+            echo "::error::'$GITHUB_REF_NAME' is not a release tag (X.Y.Z or X.Y.Z-rc.N)." >&2
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check signing secret
+        env:
+          FW_SIGNING_KEY: ${{ secrets.FW_SIGNING_KEY }}
+        run: |
+          [ -n "$FW_SIGNING_KEY" ] || { echo "::error::FW_SIGNING_KEY (research ECDSA key, PEM) is not set." >&2; exit 1; }
+
+      - name: Resolve the bootloader release
+        id: in
+        env:
+          BL_INPUT: ${{ github.event.inputs.bl_release }}
+        run: |
+          BL="${BL_INPUT:-$BL_RELEASE}"
+          echo "bl=$BL" >> "$GITHUB_OUTPUT"
+          echo "Embedding the clinical build of $BL_REPO $BL"
+
+      - name: Checkout the embedded bootloader's keys
+        uses: actions/checkout@v4
+        with:
+          repository: OpenwaterHealth/${{ env.BL_REPO }}
+          ref: ${{ steps.in.outputs.bl }}
+          path: _bl
+          sparse-checkout: py-tools/keys
+      - name: Checkout the fielded bootloader's key
+        uses: actions/checkout@v4
+        with:
+          repository: OpenwaterHealth/${{ env.BL_REPO }}
+          ref: ${{ env.FIELDED_BL }}
+          path: _bl_fielded
+          sparse-checkout: py-tools/keys
+
+      # The signing key must be the research key every research bootloader trusts (so a research
+      # unit launches the updater); the embedded bootloader trusts the clinical key, which must differ.
+      - name: Key check
+        id: keys
+        env:
+          FW_SIGNING_KEY: ${{ secrets.FW_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          KD="$(mktemp -d)"; trap 'rm -rf "$KD"' EXIT
+          printf '%s\n' "$FW_SIGNING_KEY" > "$KD/k.pem"
+          openssl pkey -in "$KD/k.pem" -pubout -out "$KD/k.pub.pem"
+          fp() { openssl pkey -pubin -in "$1" -outform DER | sha256sum | cut -d' ' -f1; }
+          SIGN=$(fp "$KD/k.pub.pem")
+          FIELDED=$(fp _bl_fielded/py-tools/keys/ecdsa_public.pem)
+          RESEARCH=$(fp _bl/py-tools/keys/research/ecdsa_public.pem)
+          CLINICAL=$(fp _bl/py-tools/keys/clinical/ecdsa_public.pem)
+          echo "signing key (research)                     : sha256:$SIGN"
+          echo "${BL_REPO} ${FIELDED_BL} trusts              : sha256:$FIELDED"
+          echo "${BL_REPO} ${{ steps.in.outputs.bl }} research key : sha256:$RESEARCH"
+          echo "${BL_REPO} ${{ steps.in.outputs.bl }} clinical key : sha256:$CLINICAL (the embedded bootloader trusts this)"
+          [ "$SIGN" = "$FIELDED" ]   || { echo "::error::FW_SIGNING_KEY is not the key ${BL_REPO} ${FIELDED_BL} trusts" >&2; exit 1; }
+          [ "$SIGN" = "$RESEARCH" ]  || { echo "::error::FW_SIGNING_KEY is not the research key" >&2; exit 1; }
+          [ "$SIGN" != "$CLINICAL" ] || { echo "::error::FW_SIGNING_KEY is the clinical key" >&2; exit 1; }
+          { echo "fp=$SIGN"; echo "clinical_fp=$CLINICAL"; } >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud (artifact reader)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.READER_SA }}
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Download the clinical bootloader
+        id: bl
+        env:
+          BL: ${{ steps.in.outputs.bl }}
+        run: |
+          set -euo pipefail
+          mkdir -p _bl_bin
+          SRC="gs://${GCS_BUCKET}/${BL_REPO}/${BL}"
+          NAME="${BL_REPO}-${BL}-clinical.bin"
+          gcloud storage cp "$SRC/$NAME" "$SRC/SHA256SUMS" _bl_bin/
+          ( cd _bl_bin && sha256sum --check --ignore-missing SHA256SUMS )
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "_bl_bin/$NAME" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Pull build image
+        run: docker pull "$BUILD_IMAGE"
+
+      - name: Build (Release, clinical bootloader embedded)
+        env:
+          BL: ${{ steps.in.outputs.bl }}
+          NAME: ${{ steps.bl.outputs.name }}
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          docker run --rm -v "$GITHUB_WORKSPACE":/workspace -w /workspace "$BUILD_IMAGE" \
+            bash -lc "git config --global --add safe.directory /workspace && \
+                      cmake --preset Release -DBL_IMAGE=/workspace/_bl_bin/$NAME -DBL_TAG=$BL-clinical && \
+                      cmake --build build/Release -j 10 && \
+                      bash scripts/check_ramfunc.sh build/Release/$REPO.elf"
+          python3 - "build/Release/$REPO.bin" "_bl_bin/$NAME" <<'PY'
+          import sys
+          img, bl = (open(p, "rb").read() for p in sys.argv[1:3])
+          sys.exit(0 if bl in img else "the embedded bootloader is not in the image")
+          PY
+
+      - name: Install openlifu-sdk (signer)
+        run: |
+          python3 -m pip install --quiet "openlifu-sdk[crypto] @ git+https://github.com/OpenwaterHealth/openlifu-sdk@${SDK_RELEASE}"
+
+      - name: Sign and verify
+        id: sign
+        env:
+          FW_SIGNING_KEY: ${{ secrets.FW_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          KD="$(mktemp -d)"; trap 'rm -rf "$KD"' EXIT
+          printf '%s\n' "$FW_SIGNING_KEY" > "$KD/ecdsa_private.pem"
+          mkdir -p _artifacts
+          OUT="_artifacts/${REPO}-${GITHUB_REF_NAME}-clinical-signed.bin"
+          python3 -m openlifu_sdk.io.LIFUCrypto sign --keys "$KD" \
+            --firmware "build/Release/$REPO.bin" --version "$FW_VERSION" --output "$OUT" | tee _sign.out
+          python3 -m openlifu_sdk.io.LIFUCrypto verify --public-key _bl/py-tools/keys/research/ecdsa_public.pem "$OUT" | tee _verify.out
+          grep -q 'Overall *: VALID' _verify.out
+          if python3 -m openlifu_sdk.io.LIFUCrypto verify --public-key _bl/py-tools/keys/clinical/ecdsa_public.pem "$OUT" | grep -q 'Overall *: VALID'; then
+            echo "::error::the image verifies with the clinical key" >&2; exit 1
+          fi
+          echo "fwversion=$(sed -n 's/.*FW version *: *\([0-9]\+\).*/\1/p' _sign.out | head -n1)" >> "$GITHUB_OUTPUT"
+
+      - name: SBOM, checksums, manifest
+        env:
+          BL: ${{ steps.in.outputs.bl }}
+          BL_SHA: ${{ steps.bl.outputs.sha256 }}
+          SIGN_FP: ${{ steps.keys.outputs.fp }}
+          CLINICAL_FP: ${{ steps.keys.outputs.clinical_fp }}
+          FWVERSION: ${{ steps.sign.outputs.fwversion }}
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          TOOLCHAIN="$(docker run --rm "$BUILD_IMAGE" arm-none-eabi-gcc --version | head -1)"
+          IMG_REF="$(docker inspect --format '{{index .RepoDigests 0}}' "$BUILD_IMAGE")"
+          python3 scripts/gen_sbom.py --root . --manifest scripts/sbom-manifest.json \
+            --name "$REPO" --version "$GITHUB_REF_NAME" --toolchain "$TOOLCHAIN" --build-image "$IMG_REF" \
+            --embedded-bootloader "$BL_REPO" "${BL}-clinical" "$BL_SHA" \
+            --signing-domain research --signing-key-fingerprint "$SIGN_FP" \
+            --property "openwater:variant=clinical (embeds the clinical bootloader; converts a research unit)" \
+            --property "openwater:signed-version=$FW_VERSION" \
+            --property "openwater:embedded-bootloader-trusts=sha256:$CLINICAL_FP" \
+            -o "_artifacts/${REPO}-${GITHUB_REF_NAME}-clinical.cdx.json"
+          cd _artifacts
+          sha256sum -- * > SHA256SUMS
+          python3 - <<'PY'
+          import datetime, json, os
+          sums = dict(line.split()[::-1] for line in open("SHA256SUMS").read().splitlines())
+          json.dump({
+              "product": os.environ["GITHUB_REPOSITORY"].split("/")[1],
+              "variant": "clinical",
+              "tag": os.environ["GITHUB_REF_NAME"],
+              "commit": os.environ["GITHUB_SHA"],
+              "built_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "fw_version": {"semver": os.environ["FW_VERSION"], "header": int(os.environ["FWVERSION"]), "encoding": "bitfield"},
+              "embedded_bootloader": {"repo": os.environ["BL_REPO"], "tag": os.environ["BL"], "variant": "clinical",
+                                      "sha256": os.environ["BL_SHA"], "trusts_public_key_sha256": os.environ["CLINICAL_FP"]},
+              "signing": {"key": "research (FW_SIGNING_KEY)", "public_key_sha256": os.environ["SIGN_FP"],
+                          "method": "ECDSA P-256 / SHA-256, openlifu-sdk " + os.environ["SDK_RELEASE"]},
+              "approval": {"environment": "clinical", "requested_by": os.environ["GITHUB_ACTOR"],
+                           "run": f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"},
+              "files": sums,
+          }, open("clinical-build-manifest.json", "w"), indent=2)
+          PY
+          cat SHA256SUMS
+
+      - name: Authenticate to Google Cloud (uploader)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.UPLOADER_SA }}
+
+      - name: Upload to the artifact bucket
+        run: |
+          set -euo pipefail
+          REPO="${GITHUB_REPOSITORY#*/}"
+          DEST="gs://${GCS_BUCKET}/${REPO}/${GITHUB_REF_NAME}/"
+          for f in _artifacts/*; do gcloud storage cp "$f" "${DEST}$(basename "$f")"; done
+          echo "Uploaded to $DEST"
+          { echo "## Clinical updater build ($PRODUCT)"; echo; echo '```'; cat _artifacts/SHA256SUMS; echo '```';
+            echo; echo "Stored in \`$DEST\` (private bucket only)."; } >> "$GITHUB_STEP_SUMMARY"
