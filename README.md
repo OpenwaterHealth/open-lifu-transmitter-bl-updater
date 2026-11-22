@@ -99,8 +99,8 @@ The build needs the Arm GNU Toolchain, CMake and Ninja (the `stm32-build-env` im
 plus the research bootloader binary from its GitHub release:
 
 ```sh
-gh release download 1.1.0-rc.2 -R OpenwaterHealth/open-lifu-transmitter-bl -p open-lifu-transmitter-bl.bin -D blimg
-cmake --preset Release -DBL_IMAGE=$PWD/blimg/open-lifu-transmitter-bl.bin -DBL_TAG=1.1.0-rc.2
+gh release download 1.1.0 -R OpenwaterHealth/open-lifu-transmitter-bl -p open-lifu-transmitter-bl.bin -D blimg
+cmake --preset Release -DBL_IMAGE=$PWD/blimg/open-lifu-transmitter-bl.bin -DBL_TAG=1.1.0
 cmake --build build/Release
 bash scripts/check_ramfunc.sh build/Release/open-lifu-transmitter-bl-updater.elf
 ```

@@ -38,7 +38,7 @@ permissions:
 env:
   PRODUCT: transmitter
   BL_REPO: open-lifu-transmitter-bl
-  BL_RELEASE: "1.1.0-rc.2"          # clinical bootloader embedded (bucket)
+  BL_RELEASE: "1.1.0"               # clinical bootloader embedded (bucket)
   FIELDED_BL: "1.0.1"               # oldest research bootloader this runs on (trusts the research key)
   FW_VERSION: "31.63.30"            # signed image version (see above)
   SDK_RELEASE: "2.1.0-rc.9"         # openlifu-sdk signer
