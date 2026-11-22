@@ -12,10 +12,12 @@ name: Build and sign updater
 # signing key is both of those (the same research key) and is not the clinical key.
 #
 # Versions. The release tag (e.g. 1.0.0) versions this repository. The image is signed
-# with FW_VERSION, a different number: the fielded bootloader refuses an image below
-# the installed application or its anti-rollback floor, so it must be above every
-# fielded application (transmitter 2.0.x) and below the first application for the new
-# bootloader (2.1.0), which then installs without a downgrade.
+# with FW_VERSION, the version of the transmitter application released with it. A bootloader
+# (1.0.x or 1.1.x) refuses an image below the installed application or its anti-rollback
+# floor, so FW_VERSION must be at least every application it runs over (2.0.x, and
+# 2.1.0: every 2.1.0-rc.N signs as 2.1.0); and no higher than the application installed
+# after it, so a refusal (nothing written, floor kept) still lets that application in.
+# Raise it with the application (e.g. to 2.1.1), or units on the newer application refuse it.
 #
 # Required secret: FW_SIGNING_KEY  ECDSA P-256 private key (PEM), the research key.
 # ---------------------------------------------------------------------------
@@ -34,10 +36,10 @@ permissions:
 env:
   PRODUCT: transmitter
   BL_REPO: open-lifu-transmitter-bl
-  BL_RELEASE: "1.1.0-rc.2"          # research bootloader embedded (GitHub release)
+  BL_RELEASE: "1.1.0"               # research bootloader embedded (GitHub release)
   BL_ASSET: open-lifu-transmitter-bl.bin
   FIELDED_BL: "1.0.1"               # the bootloader this updater replaces
-  FW_VERSION: "2.0.31"              # signed image version (see above)
+  FW_VERSION: "2.1.0"               # signed image version (see above)
   SDK_RELEASE: "2.1.0-rc.7"         # openlifu-sdk signer
   BUILD_IMAGE: ghcr.io/openwaterhealth/stm32-build-env:latest
 
