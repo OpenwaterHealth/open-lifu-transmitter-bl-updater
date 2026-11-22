@@ -6,8 +6,10 @@ bootloader's DFU, where the host installs the application:
 - USB DFU on the master;
 - I2C DFU, reached through the master, on a slave module.
 
-It exists for one migration: research units on bootloader **1.0.x** (shipped with
-transmitter app 2.0.8, bootloader `1.0.1`) to bootloader **1.1.x**. Bootloader 1.1.0
+It moves a research unit to the research bootloader it embeds. The first use is units on
+bootloader **1.0.x** (shipped with transmitter app 2.0.8, bootloader `1.0.1`) to bootloader **1.1.x**; since it is signed at
+2.1.0 (see "Versions"), it also moves a unit on an older 1.1.x research bootloader to the
+embedded one, e.g. 1.1.0-rc.N to the 1.1.0 release. Bootloader 1.1.0
 moves the end of the slot and adds the preset slots, so those units need it before
 transmitter app 2.1.x. Both bootloaders trust the same research key, and this image is
 signed with it. Clinical units are built with the new bootloader and never run this.
@@ -21,7 +23,7 @@ bootloader's DFU and installs the application. See `docs/api/LIFUFirmwareUpdate.
 
 ## What it does
 
-It runs as an ordinary application launched by bootloader 1.0.x at `0x08010400`. It is
+It runs as an ordinary application launched by the research bootloader (1.0.x or 1.1.x) at `0x08010400`. It is
 the same image on a master and on a slave.
 
 1. It masks interrupts, points VTOR at itself and turns the heartbeat LED (LD_HB) on.
@@ -73,12 +75,23 @@ The image (about 63 KB) stays well below page 96, so it fits both slots.
 ## Versions
 
 The **release tag** (e.g. `1.0.0`) versions this repository. The image is signed with
-**`FW_VERSION` = 2.0.31** (FwVersion 4127), which `build.yml` pins:
+**`FW_VERSION` = 2.1.0** (FwVersion 4128), the version of the transmitter application released
+with it. `build.yml` pins it:
 
-- 2.0.31 is above every fielded transmitter application (2.0.x), so the old bootloader
-  installs it and its floor check accepts it;
-- it is below the first application for the new bootloader (2.1.0, 4128), which then
-  installs without a downgrade even if the floor were not erased.
+- A bootloader refuses an image below the installed application or its anti-rollback floor.
+  2.1.0 is at or above every application the updater runs over: transmitter 2.0.x on a 1.0.x
+  bootloader, and 2.1.0 on a 1.1.x bootloader (every 2.1.0-rc.N signs as 2.1.0). So it moves
+  both to the embedded bootloader.
+- It is no higher than the application installed after it. On success the floor is erased
+  anyway; if the updater refuses (option bytes not open), nothing is written, the floor is at
+  most 2.1.0, and the release application still installs.
+- Raise it with the application. When the transmitter application moves to 2.1.1 or later, sign the
+  updater at that version, or units on the newer application refuse it. The SDK refuses
+  before DFU when the updater is signed below the installed application.
+
+Before this, the updater was signed 2.0.31 (4127): above every fielded 2.0.x application
+and below 2.1.0. That only ran on 1.0.x bootloaders; a 1.1.x bootloader with a 2.1.0
+application refused it.
 
 ## Build
 
@@ -98,7 +111,7 @@ references anything in flash. Signing it:
 
 ```sh
 python -m openlifu_sdk.io.LIFUCrypto sign --keys <research keys dir> \
-    --firmware build/Release/open-lifu-transmitter-bl-updater.bin --version 2.0.31 --output updater-signed.bin
+    --firmware build/Release/open-lifu-transmitter-bl-updater.bin --version 2.1.0 --output updater-signed.bin
 ```
 
 ## CI
@@ -155,8 +168,8 @@ the clinical application, then the clinical presets. With openlifu-sdk that is
   bootloader. The window is a few seconds. Keep the chain powered and do not unplug USB.
 - The updater refuses a module whose option bytes are not open, so it never touches a
   protected (clinical) unit.
-- This is a one-way migration. Once the slot holds an application above 2.0.31, the new
-  bootloader will not install the updater again.
+- A bootloader refuses this updater once the slot holds an application above `FW_VERSION`.
+  The updater released with that application, signed at its version, covers those units.
 
 ## Licence
 
