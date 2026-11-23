@@ -102,6 +102,9 @@ def main() -> int:
     ap.add_argument("--toolchain", help="arm-none-eabi-gcc --version | head -1, from the build image")
     ap.add_argument("--build-image", help="build container reference, ideally with digest")
     ap.add_argument("--embedded-bootloader", nargs=3, metavar=("REPO", "TAG", "SHA256"))
+    ap.add_argument("--embedded-bootloader-source", metavar="TEXT",
+                    help="where the embedded bootloader binary came from (evidence); default: "
+                         "'GitHub release <REPO> <TAG>, research build'")
     ap.add_argument("--signing-domain", help="research or clinical")
     ap.add_argument("--signing-key-fingerprint", help="SHA-256 (DER SPKI) of the signing public key")
     ap.add_argument("--property", action="append", default=[], metavar="NAME=VALUE")
@@ -162,7 +165,8 @@ def main() -> int:
         bref = f"pkg:github/OpenwaterHealth/{brepo}@{btag}"
         components.append(comp(brepo, btag, "firmware", supplier=ORG, bom_ref=bref, purl=bref,
                                hashes=[{"alg": "SHA-256", "content": bsha}],
-                               properties={"openwater:evidence": f"GitHub release {brepo} {btag}, research build",
+                               properties={"openwater:evidence": a.embedded_bootloader_source
+                                           or f"GitHub release {brepo} {btag}, research build",
                                            "openwater:consumers": "embedded in .rodata; written to 0x08000000 by the updater"}))
 
     derived = {c["name"] for c in components}
