@@ -207,6 +207,7 @@ jobs:
           python3 scripts/gen_sbom.py --root . --manifest scripts/sbom-manifest.json \
             --name "$REPO" --version "$GITHUB_REF_NAME" --toolchain "$TOOLCHAIN" --build-image "$IMG_REF" \
             --embedded-bootloader "$BL_REPO" "${BL}-clinical" "$BL_SHA" \
+            --embedded-bootloader-source "gs://${GCS_BUCKET}/${BL_REPO}/${BL}/${BL_REPO}-${BL}-clinical.bin, clinical build (private artifact bucket; not a GitHub release asset)" \
             --signing-domain research --signing-key-fingerprint "$SIGN_FP" \
             --property "openwater:variant=clinical (embeds the clinical bootloader; converts a research unit)" \
             --property "openwater:signed-version=$FW_VERSION" \
